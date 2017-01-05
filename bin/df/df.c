@@ -65,30 +65,118 @@ __RCSID("$NetBSD: df.c,v 1.92 2016/03/05 08:15:01 kamil Exp $");
 #include <unistd.h>
 #include <util.h>
 
+#include <setjmp.h>
+#include <prop/proplib.h>
+
+#if defined(SYSTEM_WRAPPER) || defined(SYSTEM_LIBRARY)
+#include "df.h"
+#endif
+
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 static char	*getmntpt(const char *);
 static void	 prtstat(struct statvfs *, int);
 static int	 selected(const char *, size_t);
+#endif
 static void	 maketypelist(char *);
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 static size_t	 regetmntinfo(struct statvfs **, size_t);
+#endif
 __dead static void usage(void);
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 static void	 prthumanval(int64_t, const char *);
 static void	 prthuman(struct statvfs *, int64_t, int64_t);
+#endif
 
 static int	 aflag, gflag, hflag, iflag, lflag, nflag, Pflag;
 static long	 usize;
 static char	**typelist;
 
-int
-main(int argc, char *argv[])
+#if defined(SYSTEM_LIBRARY)
+static jmp_buf jmpenv;
+static char *error_message;
+#endif
+
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_WRAPPER)
+#define report_err err
+#define report_errx errx
+#else
+__dead void
+report_verrc(int eval, int code, const char *fmt, va_list ap)
 {
+	char *s = NULL;
+	if (fmt != NULL)
+		if (vasprintf(&s, fmt, ap) < 0)
+			longjmp(jmpenv, eval);
+
+	asprintf(&error_message, "%s%s%s", (s ? s : ""), (s ? ": " : ""),
+	    strerror(code));
+	free(s);
+	longjmp(jmpenv, eval);
+}
+
+__dead static void
+report_verr(int eval, const char *fmt, va_list ap)
+{
+	verrc(eval, errno, fmt, ap);
+}
+
+__dead static void
+report_err(int eval, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	verr(eval, fmt, ap);
+	va_end(ap);
+}
+
+__dead void
+report_verrx(int eval, const char *fmt, va_list ap)
+{
+	asprintf(&error_message, "%s", fmt);
+	longjmp(jmpenv, eval);
+}
+
+__dead void
+report_errx(int eval, const char *fmt, ...)
+{
+        va_list ap;
+
+        va_start(ap, fmt);
+	asprintf(&error_message, "%s", fmt);
+        va_end(ap);
+	longjmp(jmpenv, eval);
+}
+#endif
+
+int
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_WRAPPER)
+main(int argc, char *argv[])
+#else
+__used
+df(int argc, char *argv[], void *prop)
+#endif
+{
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 	struct stat stbuf;
 	struct statvfs *mntbuf;
 	long mntsize;
-	int ch, i, maxwidth, width;
+#endif
+	int ch;
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
+	int i, maxwidth, width;
 	char *mntpt;
+#endif
 
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_WRAPPER)
 	setprogname(argv[0]);
 	(void)setlocale(LC_ALL, "");
+#endif
+
+#if defined(SYSTEM_LIBRARY)
+	int rv;
+	if ((rv = setjmp(jmpenv)) == 0) {
+#endif
 
 	while ((ch = getopt(argc, argv, "aGghiklmnPt:")) != -1)
 		switch (ch) {
@@ -128,7 +216,7 @@ main(int argc, char *argv[])
 			break;
 		case 't':
 			if (typelist != NULL)
-				errx(EXIT_FAILURE,
+				report_errx(EXIT_FAILURE,
 				    "only one -t option may be specified.");
 			maketypelist(optarg);
 			break;
@@ -138,10 +226,10 @@ main(int argc, char *argv[])
 		}
 
 	if (gflag && (Pflag || iflag))
-		errx(EXIT_FAILURE,
+		report_errx(EXIT_FAILURE,
 		    "only one of -G and -P or -i may be specified");
 	if (Pflag && iflag)
-		errx(EXIT_FAILURE,
+		report_errx(EXIT_FAILURE,
 		    "only one of -P and -i may be specified");
 #if 0
 	/*
@@ -151,6 +239,16 @@ main(int argc, char *argv[])
 		errx(EXIT_FAILURE,
 		    "non-standard block size incompatible with -P");
 #endif
+
+#if defined(SYSTEM_WRAPPER)
+	void *prop;
+	int retlib;
+	retlib = df(argc, argv, &prop);
+	if (retlib != EXIT_SUCCESS) {
+		fprintf(stderr, "%s", (char*)prop);
+		exit(retlib);
+	}
+#else
 	argc -= optind;
 	argv += optind;
 
@@ -207,9 +305,18 @@ main(int argc, char *argv[])
 	}
 	for (i = 0; i < mntsize; i++)
 		prtstat(&mntbuf[i], maxwidth);
+#endif
 	return 0;
+
+#if defined(SYSTEM_LIBRARY)
+	} else {
+		memcpy(prop, error_message, sizeof(prop));
+		return rv;
+	}
+#endif
 }
 
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 static char *
 getmntpt(const char *name)
 {
@@ -225,9 +332,11 @@ getmntpt(const char *name)
 	}
 	return 0;
 }
+#endif
 
 static enum { IN_LIST, NOT_IN_LIST } which;
 
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 static int
 selected(const char *type, size_t len)
 {
@@ -241,6 +350,7 @@ selected(const char *type, size_t len)
 			return which == IN_LIST ? 1 : 0;
 	return which == IN_LIST ? 0 : 1;
 }
+#endif
 
 static void
 maketypelist(char *fslist)
@@ -280,6 +390,7 @@ maketypelist(char *fslist)
 	av[i] = NULL;
 }
 
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_LIBRARY)
 /*
  * Make a pass over the filesystem info in ``mntbuf'' filtering out
  * filesystem types not in ``fsmask'' and possibly re-stating to get
@@ -506,15 +617,21 @@ prtstat(struct statvfs *sfsp, int maxwidth)
 	}
 	(void)printf(" %s\n", sfsp->f_mntonname);
 }
+#endif
 
 static void
 usage(void)
 {
-
+#if defined(SYSTEM_STANDALONE) || defined(SYSTEM_WRAPPER)
 	(void)fprintf(stderr,
 	    "Usage: %s [-aGgln] [-hkm|-ihkm|-Pk] [-t type] [file | "
 	    "file_system ...]\n",
 	    getprogname());
 	exit(1);
+#else
+	report_errx(EXIT_FAILURE,
+	    "Usage: df [-aGgln] [-hkm|-ihkm|-Pk] [-t type] [file | "
+	    "file_system ...]\n");
+#endif
 	/* NOTREACHED */
 }
